@@ -1,6 +1,7 @@
 module Main where
 
 import Prelude
+
 import Control.IxMonad (ibind, (:*>), (:>>=))
 import Control.Monad.Aff (Aff, Canceler, launchAff)
 import Control.Monad.Aff.AVar (AVAR)

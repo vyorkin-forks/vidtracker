@@ -2,6 +2,7 @@ module Main where
 
 import Prelude
 
+import Chanpon (Table(..), createTableIfNotExists, deleteFrom, insertOrReplaceInto, selectAll)
 import Config as C
 import Control.Monad.Aff (Aff, attempt, launchAff_)
 import Control.Monad.Aff.AVar (AVAR)
@@ -10,15 +11,20 @@ import Control.Monad.Aff.Console (error)
 import Control.Monad.Eff (Eff, kind Effect)
 import Control.Monad.Eff.Class (liftEff)
 import Control.Monad.Eff.Console (CONSOLE, log)
+import Control.Monad.Eff.Unsafe (unsafeCoerceEff)
+import Control.Monad.Except (runExcept)
 import Data.Array (filter, sortBy)
 import Data.Either (Either(Left, Right))
+import Data.JSDate (now, toISOString)
 import Data.Maybe (Maybe(..))
+import Data.Monoid (mempty)
 import Data.Newtype (unwrap)
 import Data.Record (get)
 import Data.String (Pattern(Pattern), contains)
 import Data.Symbol (class IsSymbol, SProxy(..), reflectSymbol)
 import Data.Traversable (sequence, traverse, traverse_)
 import Data.Tuple (Tuple(Tuple), fst, snd)
+import Debug.Trace (spy)
 import Makkori as M
 import Node.Buffer (BUFFER, Buffer, create, writeString)
 import Node.ChildProcess (CHILD_PROCESS, defaultExecOptions, defaultSpawnOptions, exec, spawn)
@@ -31,13 +37,15 @@ import Node.Path (concat)
 import Node.Platform (Platform(..))
 import Node.Process (PROCESS, platform)
 import Routes (GetRequest, PostRequest, Route, apiRoutes)
-import SQLite3 (DBConnection, DBEffects, FilePath, newDB, queryDB)
+import SQLite3 (DBConnection, DBEffects, FilePath, newDB)
 import Simple.JSON (class ReadForeign, class WriteForeign, read, writeJSON)
 import Tortellini (parseIni)
-import Type.Prelude (class RowToList, RLProxy(..))
+import Type.Prelude (class RowToList, Proxy(..), RLProxy(..))
 import Type.Row (Cons, Nil, kind RowList)
-import Types (FileData(FileData), GetIconsRequest, OpenRequest(OpenRequest), Path(Path), RemoveRequest(RemoveRequest), Success(Success), WatchedData)
-import Unsafe.Coerce (unsafeCoerce)
+import Types (FileData(FileData), GetIconsRequest, OpenRequest(OpenRequest), Path(Path), RemoveRequest(RemoveRequest), Success(Success), WatchedData(..))
+
+watchedTable :: Table
+watchedTable = Table "watched"
 
 readdir' :: forall eff.
   String
@@ -101,9 +109,13 @@ instance gwA ::
   ( MonadAff (db :: DBEffects | trash) (Aff e)
   ) => GetWatched (Aff e) where
   getWatchedData {db} = do
-    watchedData :: Array WatchedData <- liftAff $ unsafeCoerce <$>
-      queryDB db "SELECT path, created FROM watched;" []
-    pure $ watchedData
+    results <- liftAff $ selectAll watchedTable db Proxy
+    case runExcept $ sequence results of
+      Left e -> do
+        let _ = spy ("Error on getWatchedData: " <> show e)
+        pure mempty
+      Right xs -> do
+        pure $ WatchedData <$> xs
 
 class GetIcons m where
   getIconsData :: Config -> GetIconsRequest -> m Success
@@ -123,8 +135,10 @@ instance uwA ::
   ) => UpdateWatched (Aff e) where
   updateWatched config@{db} (FileData ur) = do
     _ <- liftAff $ if ur.watched
-      then queryDB db "INSERT OR REPLACE INTO watched (path, created) VALUES ($1, datetime());" [unwrap ur.path]
-      else queryDB db "DELETE FROM watched WHERE path = $1" [unwrap ur.path]
+      then do
+        now' <- liftEff <<< unsafeCoerceEff $ toISOString =<< now
+        insertOrReplaceInto watchedTable db {path: ur.path, created: now'}
+      else deleteFrom watchedTable db {path: ur.path}
     getWatchedData config
 
 class OpenFile m where
@@ -163,7 +177,10 @@ instance rfA ::
 ensureDB :: forall eff. FilePath -> Aff (db :: DBEffects | eff) DBConnection
 ensureDB path = do
   db <- newDB path
-  _ <- queryDB db "CREATE TABLE IF NOT EXISTS watched (path varchar(20) primary key unique, created datetime);" []
+  createTableIfNotExists watchedTable db
+    { path: "text primary key unique"
+    , created: "datetime"
+    }
   pure db
 
 registerRoutes :: forall routes handlers routesL handlersL app m
